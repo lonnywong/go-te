@@ -635,7 +635,7 @@ func (h *HistoryScreen) indexInternal() {
 	if h.Cursor.Row == bottom {
 		h.history.Top.append(h.Buffer[top])
 	}
-	h.Screen.Index()
+	h.Screen.index(false)
 }
 
 func (h *HistoryScreen) reverseIndexInternal() {
@@ -643,7 +643,7 @@ func (h *HistoryScreen) reverseIndexInternal() {
 	if h.Cursor.Row == top {
 		h.history.Bottom.append(h.Buffer[bottom])
 	}
-	h.Screen.ReverseIndex()
+	h.Screen.reverseIndex(false)
 }
 
 // Draw renders text at the current cursor position.

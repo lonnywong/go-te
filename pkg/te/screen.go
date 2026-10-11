@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/rivo/uniseg"
@@ -29,7 +30,9 @@ type Savepoint struct {
 	SavedCol *int
 }
 
-// Screen models a terminal screen buffer.
+// Screen models a terminal screen buffer. Buffer rows are mutable screen-owned
+// storage and can be reused by scrolling, reset and resize. Use LinesCells to
+// retain a snapshot independently of subsequent screen operations.
 type Screen struct {
 	Columns             int
 	Lines               int
@@ -87,8 +90,7 @@ type Screen struct {
 
 // NewScreen creates a Screen with the specified dimensions.
 func NewScreen(cols, lines int) *Screen {
-	s := &Screen{}
-	s.Resize(lines, cols)
+	s := &Screen{Lines: maxInt(1, lines), Columns: maxInt(1, cols)}
 	s.Reset()
 	return s
 }
@@ -101,7 +103,20 @@ func (s *Screen) Reset() {
 	}
 	s.Dirty = make(map[int]struct{})
 	s.markDirtyRange(0, s.Lines-1)
-	s.Buffer = makeBlankCells(s.Lines, s.Columns)
+	if len(s.Buffer) < s.Lines {
+		s.Buffer = makeBlankCells(s.Lines, s.Columns)
+	} else {
+		s.Buffer = s.Buffer[:s.Lines]
+		cell := Cell{Data: " ", Attr: Attr{Fg: Color{Name: "default", Mode: ColorDefault}, Bg: Color{Name: "default", Mode: ColorDefault}}}
+		for row := range s.Buffer {
+			if cap(s.Buffer[row]) < s.Columns {
+				s.Buffer[row] = blankLine(s.Columns, cell)
+			} else {
+				s.Buffer[row] = s.Buffer[row][:s.Columns]
+				fillCells(s.Buffer[row], cell)
+			}
+		}
+	}
 	s.Margins = nil
 	s.altBuffer = nil
 	s.altSavepoints = nil
@@ -212,11 +227,15 @@ func (s *Screen) Resize(lines, columns int) {
 	if columns > s.Columns {
 		for row := range s.Buffer {
 			if len(s.Buffer[row]) < columns {
-				missing := make([]Cell, columns-len(s.Buffer[row]))
-				for i := range missing {
-					missing[i] = s.defaultCell()
+				oldLen := len(s.Buffer[row])
+				if cap(s.Buffer[row]) >= columns {
+					s.Buffer[row] = s.Buffer[row][:columns]
+				} else {
+					line := make([]Cell, columns)
+					copy(line, s.Buffer[row])
+					s.Buffer[row] = line
 				}
-				s.Buffer[row] = append(s.Buffer[row], missing...)
+				fillCells(s.Buffer[row][oldLen:], s.defaultCell())
 			}
 		}
 	}
@@ -286,6 +305,7 @@ func (s *Screen) Display() []string {
 	lines := make([]string, s.Lines)
 	for row := 0; row < s.Lines; row++ {
 		var b strings.Builder
+		b.Grow(s.Columns)
 		col := 0
 		for col < s.Columns {
 			cell := s.Buffer[row][col]
@@ -422,6 +442,11 @@ func (s *Screen) CarriageReturn() {
 
 // Index performs an index (scroll up) operation.
 func (s *Screen) Index() {
+	s.index(true)
+}
+
+// HistoryScreen preserves outgoing row references for scrollback consumers.
+func (s *Screen) index(recycle bool) {
 	s.wrapNext = false
 	top, bottom := s.scrollRegion()
 	if s.Cursor.Row == bottom {
@@ -429,10 +454,13 @@ func (s *Screen) Index() {
 			return
 		}
 		s.markDirtyRange(0, s.Lines-1)
-		for row := top; row < bottom; row++ {
-			s.Buffer[row] = s.Buffer[row+1]
+		line := s.Buffer[top]
+		if !recycle {
+			line = make([]Cell, s.Columns)
 		}
-		s.Buffer[bottom] = blankLine(s.Columns, s.defaultCell())
+		copy(s.Buffer[top:bottom], s.Buffer[top+1:bottom+1])
+		fillCells(line, s.defaultCell())
+		s.Buffer[bottom] = line
 		return
 	}
 	if s.Cursor.Row < bottom {
@@ -446,6 +474,10 @@ func (s *Screen) Index() {
 
 // ReverseIndex performs a reverse index operation.
 func (s *Screen) ReverseIndex() {
+	s.reverseIndex(true)
+}
+
+func (s *Screen) reverseIndex(recycle bool) {
 	s.wrapNext = false
 	top, bottom := s.scrollRegion()
 	if s.Cursor.Row == top {
@@ -453,10 +485,13 @@ func (s *Screen) ReverseIndex() {
 			return
 		}
 		s.markDirtyRange(0, s.Lines-1)
-		for row := bottom; row > top; row-- {
-			s.Buffer[row] = s.Buffer[row-1]
+		line := s.Buffer[bottom]
+		if !recycle {
+			line = make([]Cell, s.Columns)
 		}
-		s.Buffer[top] = blankLine(s.Columns, s.defaultCell())
+		copy(s.Buffer[top+1:bottom+1], s.Buffer[top:bottom])
+		fillCells(line, s.defaultCell())
+		s.Buffer[top] = line
 		return
 	}
 	if s.Cursor.Row > top {
@@ -2797,7 +2832,20 @@ func (s *Screen) translate(data string) string {
 	if s.Charset == 1 {
 		mapping = s.G1
 	}
+	// Most input uses an identity charset. Keep its string (and grapheme
+	// substrings) without allocating a translated copy.
+	changed := false
+	for _, r := range data {
+		if r == utf8.RuneError || (r < 256 && mapping[r] != r) {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return data
+	}
 	var b strings.Builder
+	b.Grow(len(data))
 	for _, r := range data {
 		if r >= 0 && r < 256 {
 			b.WriteRune(mapping[r])
@@ -2832,10 +2880,20 @@ func colorFromName(name string, mode ColorMode, index uint8) Color {
 
 func blankLine(cols int, cell Cell) []Cell {
 	line := make([]Cell, cols)
-	for col := 0; col < cols; col++ {
-		line[col] = cell
-	}
+	fillCells(line, cell)
 	return line
+}
+
+func fillCells(line []Cell, cell Cell) {
+	if len(line) == 0 {
+		return
+	}
+	line[0] = cell
+	// Copy the initialized prefix exponentially. Bulk copies avoid repeating
+	// the pointer-bearing Cell assignment for every column.
+	for filled := 1; filled < len(line); {
+		filled += copy(line[filled:], line[:filled])
+	}
 }
 
 func makeBlankCells(lines, cols int) [][]Cell {
