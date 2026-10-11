@@ -51,6 +51,11 @@ screen := te.NewScreen(80, 24)
 lines := screen.Display()
 ```
 
+Use `screen.DisplayAnsi()` to retrieve rows with ANSI colors and styles preserved.
+Each row resets its styles at the start and end, so rows can be sliced or rendered
+independently without style bleeding. Like `Display()`, it preserves trailing spaces
+and omits wide-character padding cells.
+
 ### Stream / ByteStream
 `Stream` consumes UTF-8 strings and dispatches parsed escape sequences to a screen. `ByteStream` accepts raw bytes and handles UTF-8 decoding.
 

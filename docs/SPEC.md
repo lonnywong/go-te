@@ -107,10 +107,14 @@ func NewScreen(cols, lines int) *Screen
 func (s *Screen) Resize(lines, cols int)
 func (s *Screen) Reset()
 func (s *Screen) Display() []string
+func (s *Screen) DisplayAnsi() []string
 func (s *Screen) LinesCells() [][]Cell
 ```
 
 - `Display()` returns the visible screen as `[]string`, one entry per line.
+- `DisplayAnsi()` returns ANSI-styled rows with independent SGR resets at both ends,
+  preserving default, 16-color, 256-color, true-color, and visual style attributes.
+  It omits wide-character padding like `Display()` and does not export cell protection.
 - `LinesCells()` exposes the full cell matrix for renderers needing attributes.
 - `Screen` exposes fields for buffer, modes, cursor, margins, tab stops, title, and icon name.
 
