@@ -2,6 +2,31 @@ SHELL := /bin/sh
 
 .DEFAULT_GOAL := help
 
+# Disposable storage: explicit override; CI runner/inherited tmp; local workspace.
+INHERITED_TMPDIR := $(TMPDIR)
+CI_MODE := $(filter-out 0 false,$(strip $(CI)))
+GENERIC_TMP_BASE := $(if $(strip $(INHERITED_TMPDIR)),$(INHERITED_TMPDIR),/tmp)
+ifeq ($(strip $(WORKSPACE_TMP_BASE)),)
+ifneq ($(CI_MODE),)
+TMP_BASE := $(if $(strip $(RUNNER_TEMP)),$(RUNNER_TEMP),$(GENERIC_TMP_BASE))
+else
+TMP_BASE := $(shell if test -d /workspace/tmp && test -w /workspace/tmp; then printf /workspace/tmp; else printf '%s' '$(GENERIC_TMP_BASE)'; fi)
+endif
+else
+TMP_BASE := $(WORKSPACE_TMP_BASE)
+endif
+PROJECT_TMP := $(abspath $(TMP_BASE)/go-te)
+export TMPDIR := $(PROJECT_TMP)/runs
+export GOCACHE := $(PROJECT_TMP)/cache/go-build
+export GOMODCACHE := $(PROJECT_TMP)/cache/go-mod
+export GOTMPDIR := $(PROJECT_TMP)/build/go-tmp
+export GOTOOLCHAIN := local
+COVERAGE_FILE := $(PROJECT_TMP)/tests/coverage.out
+
+.PHONY: dirs
+dirs:
+	@mkdir -p "$(TMPDIR)" "$(GOCACHE)" "$(GOMODCACHE)" "$(GOTMPDIR)" "$(PROJECT_TMP)/tests" "$(PROJECT_TMP)/logs" "$(PROJECT_TMP)/runs/profiles" "$(PROJECT_TMP)/build/analysis"
+
 # Generic Makefile template.
 # Projects can extend/override these targets.
 
@@ -44,7 +69,7 @@ install-dev: ## Install dev dependencies
 	@$(MAKE) deps
 
 .PHONY: deps
-deps: ## Install Go toolchain dependencies
+deps: dirs ## Install Go toolchain dependencies
 	@command -v go >/dev/null 2>&1 || { echo "Go is required"; exit 1; }
 	go mod download
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
@@ -61,7 +86,7 @@ deps: ## Install Go toolchain dependencies
 # =============================================================================
 
 .PHONY: vet
-vet: ## Run go vet
+vet: dirs ## Run go vet
 	go vet ./...
 
 .PHONY: lint
@@ -73,12 +98,12 @@ security: ## Run gosec
 	gosec ./...
 
 .PHONY: test
-test: ## Run tests
-	go test -v -race -coverprofile=coverage.out ./...
+test: dirs ## Run tests, race detection and scoped coverage
+	go test -v -race -coverprofile="$(COVERAGE_FILE)" ./...
 
 .PHONY: coverage
-coverage: ## Run tests with coverage
-	go test -v -coverprofile=coverage.out ./...
+coverage: dirs ## Run tests with scoped coverage
+	go test -v -coverprofile="$(COVERAGE_FILE)" ./...
 
 .PHONY: check
 check: ## Run standard validation pipeline
@@ -118,6 +143,15 @@ push: ## Push commits and current tag to origin
 # =============================================================================
 
 .PHONY: clean
-clean: ## Remove local build/test artifacts
-	@rm -f coverage.out
-	@go clean -testcache
+clean: ## Remove owned test/build outputs; retain shared caches
+	@test "$(PROJECT_TMP)" != / && test "$$(basename "$(PROJECT_TMP)")" = go-te
+	rm -rf "$(PROJECT_TMP)/tests" "$(PROJECT_TMP)/build"
+
+.PHONY: benchmark profile
+benchmark: dirs ## Run allocation benchmarks without profiling
+	go test ./pkg/te -run '^$$' -bench . -benchmem -count=5
+profile: dirs ## Profile the complete tests of every test-bearing package
+	@set -e; for pkg in $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...); do \
+		name=$$(printf '%s' "$$pkg" | tr '/.' '--'); \
+		go test "$$pkg" -count=1 -cpuprofile="$(PROJECT_TMP)/runs/profiles/$$name.cpu" -memprofile="$(PROJECT_TMP)/runs/profiles/$$name.mem" -memprofilerate=1 -o "$(PROJECT_TMP)/build/analysis/$$name.test"; \
+	done
